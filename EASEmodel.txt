@@ -1,0 +1,148 @@
+from scipy.sparse import csr_matrix
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import LabelEncoder
+from multiprocessing import Pool, cpu_count
+from Models.AutoencoderRS import AutoencoderRS
+from itertools import starmap
+
+class EASE(AutoencoderRS)
+    
+    httpsarxiv.orgpdf1905.03375.pdf
+    httpsgithub.comDarel13712ease_rec
+    
+    
+    def computeB(self,lambda_)
+        
+        Parameters
+        ----------
+        lambda_  float
+            L2-regulization parameter
+
+        Returns
+        -------
+        np.array
+            Matrix B computed from X (closed solution from paper)
+        
+        G = self.X.T.dot(self.X).toarray()
+        diagIndices = np.diag_indices(G.shape[0])
+        G[diagIndices] += lambda_
+        P = np.linalg.inv(G)
+        B = P  (-np.diag(P))
+        B[diagIndices] = 0
+        return B
+    
+    
+    def fit(self, df, lambda_ float = 1000, implicit=True)
+        
+        Parameters
+        ----------
+        df  pandas.DataFrame
+            Dataframe with columns client_id, merchant_id and (normalized_num_of_txs)
+        lambda_  float, optional
+            L2-regulization parameter, by default 1000
+        implicit  bool, optional
+            True - using 1 and 0, False using value from column normalized_num_of_txs, by default True
+        
+        clients, merchants = self._get_clients_and_merchants(df)
+        values = (
+            np.ones(df.shape[0])
+            if implicit
+            else df['normalized_num_of_txs']
+        )
+        self.X = csr_matrix((values, (clients, merchants)))   
+        self.B = self.computeB(lambda_)
+        
+    
+    def load_newX(self, df, implicit=True)
+
+        merchants = self.merchant_enc.inverse_transform(range(self.B.shape[0]))
+        
+        
+        candidates = list(filter(lambda candidate candidate in merchants, df[merchant_id].unique()))
+        df = df[df['merchant_id'].isin(candidates)]   
+        
+        clients = self.client_enc.fit_transform(df.loc[, 'client_id'])
+        df_merchants = self.merchant_enc.transform(df.loc[, 'merchant_id'])
+        
+        values = (
+            np.ones(df.shape[0])
+            if implicit
+            else df['normalized_num_of_txs']
+        )
+
+        
+        self.X = csr_matrix(
+            (
+                np.append(values, [0]), 
+                (
+                    np.append(clients, clients[-1]), 
+                    np.append(df_merchants, self.B.shape[0] - 1)
+                )
+            )
+        )   
+
+        
+    def computePrediction(self, client)
+        
+        Parameters
+        ----------
+        client  int
+            index of client
+
+        Returns
+        -------
+        np.array
+            prediction row (=merchant scores) for one client
+        
+        return self.X[client, ].dot(self.B)
+    
+
+    def computeFullPredictionMatrix(self, merchant_indices=None)
+        
+        Returns
+        -------
+        np.array
+            Whole matrix clientsmerchants with predictions
+        
+        if (merchant_indices is None)
+            return self.X.dot(self.B)
+        if len(merchant_indices)==0
+            return np. array([])
+        else
+            return self.X.dot(self.B[,merchant_indices])
+    
+    def computeClientsBlockPredictionMatrix(self, start, end, merchant_indices=None)
+        if (merchant_indices is None)
+            return self.X[startend, ].dot(self.B)
+        if len(merchant_indices)==0
+            return np. array([])
+        else
+            return self.X[startend, ].dot(self.B[,merchant_indices])
+    
+    def computePredictionClientMerchant(self, client, merchant)
+        
+        Parameters
+        ----------
+        client  int
+            index of client
+        merchant  int
+            index of merchant
+
+        Returns
+        -------
+        np.array
+            predicted score of merchant for client
+        
+        return self.X[client, ].dot(self.B[,merchant])[0]
+        
+
+
+
+
+
+
+
+
+
+

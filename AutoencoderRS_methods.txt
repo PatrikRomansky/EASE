@@ -1,0 +1,189 @@
+import pandas as pd
+import numpy as np
+import os
+import sys
+from Helpers.Helper_Functions import check_file_existence, csv_files_folder
+from Models.AutoencoderRS import AutoencoderRS
+import Helpers.Database.SQLHelper as SQLHelper
+import pytz
+from datetime import datetime
+
+def get_train(df):
+    train = df[df["has_transaction_before"] == True]
+    train_clients = train["client_id"].unique()
+    train_merchants = train["merchant_id"].unique()  
+    return train, train_clients, train_merchants
+
+
+def prepare_and_compute_iteratively_new_X(algorithm: AutoencoderRS, df,train, train_clients, train_merchants, table_name, \
+                                    connection, client_step=10_000, candidates = None):  
+    
+    # print(f"delete called -- {datetime.datetime.now()}")
+
+    # SQLHelper.delete_from_table_iteratively(table_name, connection,client_step)
+    
+    number_of_steps = (algorithm.X.shape[0] + client_step -1) // client_step 
+    pd.options.mode.chained_assignment = None
+    df_without_tx = df[(~df["client_id"].isin(train_clients)) | (~df["merchant_id"].isin(train_merchants))]
+    df = df.loc[(df["client_id"].isin(train_clients)) & (df["merchant_id"].isin(train_merchants))]
+    client_indices = np.unique(algorithm.client_enc.transform(df["client_id"]))
+    merchant_indices=[]
+    
+    pd.options.mode.chained_assignment = 'warn' 
+    
+    if (candidates is None) or (len(candidates)==0):
+        merchant_indices = np.unique(algorithm.merchant_enc.transform(df["merchant_id"]))  
+        
+    else:
+        Not_in_candidates = list(filter(lambda candidate: candidate not in np.unique(train_merchants), candidates))
+  
+        candidates = list(filter(lambda candidate: candidate in np.unique(train_merchants), candidates))
+        merchant_indices = np.unique(algorithm.merchant_enc.transform(candidates))
+        
+        print("-- {0} - Merchant without EASE score.".format(datetime.now(pytz.timezone('Europe/Prague')).strftime("%Y-%m-%d -- %H:%M:%S")))
+        
+        for n in range(number_of_steps):
+            print("--- {0} - Insert null merchant {1} // {2}".format(datetime.now(pytz.timezone('Europe/Prague')).strftime("%Y-%m-%d -- %H:%M:%S"), n + 1, number_of_steps ))
+
+            start = n * client_step
+            end = (n+1) * client_step
+
+            r = pd.DataFrame({
+                "client_id": np.repeat(algorithm.client_enc.inverse_transform(client_indices[start:end]), len(Not_in_candidates)),
+                "merchant_id" : Not_in_candidates * len(client_indices[start:end]),
+                "has_transaction_before" : [False] * (len(client_indices[start:end]) * len(Not_in_candidates)),
+                "score_ease": [0] * (len(client_indices[start:end]) * len(Not_in_candidates)),
+                "score": [None] * (len(client_indices[start:end]) * len(Not_in_candidates))
+            })        
+            SQLHelper.insert_to_table(r, table_name, connection)  
+    
+    print("-- {0} - Merchant with EASE score.".format(datetime.now(pytz.timezone('Europe/Prague')).strftime("%Y-%m-%d -- %H:%M:%S")))
+                   
+    # pd.options.mode.chained_assignment = 'warn' 
+    for n in range(number_of_steps):
+        print("--- {0} - Prepare and compute of {1} // {2}".format(datetime.now(pytz.timezone('Europe/Prague')).strftime("%Y-%m-%d -- %H:%M:%S"), n + 1, number_of_steps ))
+        
+        start = n*client_step
+        end = (n+1)*client_step
+        r = pd.DataFrame({
+            "client_id": np.repeat(algorithm.client_enc.inverse_transform(client_indices[start:end]), len(merchant_indices)),
+            "merchant_id" : list(algorithm.merchant_enc.inverse_transform(merchant_indices)) * len(client_indices[start:end]),
+            "has_transaction_before" : list(map(bool,algorithm.X[start:end,merchant_indices].toarray().flatten())),
+            "score_ease": algorithm.computeClientsBlockPredictionMatrix(start, end, merchant_indices).flatten(),
+            "score": [None] * (len(client_indices[start:end]) * len(merchant_indices))
+        })
+        print("--- {0} - Insert into table {1}: {2} // {3}".format(datetime.now(pytz.timezone('Europe/Prague')).strftime("%Y-%m-%d -- %H:%M:%S"), table_name, n + 1, number_of_steps ))
+        
+        
+        SQLHelper.insert_to_table(r, table_name, connection)
+    """
+    if (len(df_without_tx) > 0):
+        print("-- {0} - Insert NULL values into table {1}: {2} // {3}".format(datetime.now(pytz.timezone('Europe/Prague')).strftime("%Y-%m-%d -- %H:%M:%S"), table_name, n + 1, number_of_steps ))
+        SQLHelper.insert_to_table(df_without_tx, table_name, connection)
+    """
+
+
+
+
+def prepare_and_compute_iteratively(algorithm: AutoencoderRS, df,train, train_clients, train_merchants, table_name, \
+                                    connection, client_step=10_000, candidates = None):  
+    
+    # print(f"delete called -- {datetime.datetime.now()}")
+    # SQLHelper.delete_from_table_iteratively(table_name, connection,client_step)
+    
+    number_of_steps = (algorithm.X.shape[0] + client_step -1) // client_step 
+    pd.options.mode.chained_assignment = None
+    df_without_tx = df[(~df["client_id"].isin(train_clients)) | (~df["merchant_id"].isin(train_merchants))]
+    df = df.loc[(df["client_id"].isin(train_clients)) & (df["merchant_id"].isin(train_merchants))]
+    client_indices = np.unique(algorithm.client_enc.transform(df["client_id"]))
+    merchant_indices=[]
+    
+    pd.options.mode.chained_assignment = 'warn' 
+    
+    if (candidates is None) or (len(candidates)==0):
+        merchant_indices = np.unique(algorithm.merchant_enc.transform(df["merchant_id"]))  
+        
+    else:
+        Not_in_candidates = list(filter(lambda candidate: candidate not in df["merchant_id"].unique(), candidates))
+  
+        candidates = list(filter(lambda candidate: candidate in df["merchant_id"].unique(), candidates))
+        merchant_indices = np.unique(algorithm.merchant_enc.transform(candidates))
+        
+        print("-- {0} - Merchant without EASE score.".format(datetime.now(pytz.timezone('Europe/Prague')).strftime("%Y-%m-%d -- %H:%M:%S")))
+        
+        for n in range(number_of_steps):
+            print("--- {0} - Insert null merchant {1} // {2}".format(datetime.now(pytz.timezone('Europe/Prague')).strftime("%Y-%m-%d -- %H:%M:%S"), n + 1, number_of_steps ))
+
+            start = n * client_step
+            end = (n+1) * client_step
+
+            r = pd.DataFrame({
+                "client_id": np.repeat(algorithm.client_enc.inverse_transform(client_indices[start:end]), len(Not_in_candidates)),
+                "merchant_id" : Not_in_candidates * len(client_indices[start:end]),
+                "has_transaction_before" : [False] * (len(client_indices[start:end]) * len(Not_in_candidates)),
+                "score_ease": [0] * (len(client_indices[start:end]) * len(Not_in_candidates)),
+                "score": [None] * (len(client_indices[start:end]) * len(Not_in_candidates))
+            })        
+            SQLHelper.insert_to_table(r, table_name, connection)  
+    
+    print("-- {0} - Merchant with EASE score.".format(datetime.now(pytz.timezone('Europe/Prague')).strftime("%Y-%m-%d -- %H:%M:%S")))
+                   
+    # pd.options.mode.chained_assignment = 'warn' 
+    for n in range(number_of_steps):
+        print("--- {0} - Prepare and compute of {1} // {2}".format(datetime.now(pytz.timezone('Europe/Prague')).strftime("%Y-%m-%d -- %H:%M:%S"), n + 1, number_of_steps ))
+        
+        start = n*client_step
+        end = (n+1)*client_step
+        r = pd.DataFrame({
+            "client_id": np.repeat(algorithm.client_enc.inverse_transform(client_indices[start:end]), len(merchant_indices)),
+            "merchant_id" : list(algorithm.merchant_enc.inverse_transform(merchant_indices)) * len(client_indices[start:end]),
+            "has_transaction_before" : list(map(bool,algorithm.X[start:end,merchant_indices].toarray().flatten())),
+            "score_ease": algorithm.computeClientsBlockPredictionMatrix(start, end, merchant_indices).flatten(),
+            "score": [None] * (len(client_indices[start:end]) * len(merchant_indices))
+        })
+        print("--- {0} - Insert into table {1}: {2} // {3}".format(datetime.now(pytz.timezone('Europe/Prague')).strftime("%Y-%m-%d -- %H:%M:%S"), table_name, n + 1, number_of_steps ))
+        
+        
+        SQLHelper.insert_to_table(r, table_name, connection)
+    """
+    if (len(df_without_tx) > 0):
+        print("-- {0} - Insert NULL values into table {1}: {2} // {3}".format(datetime.now(pytz.timezone('Europe/Prague')).strftime("%Y-%m-%d -- %H:%M:%S"), table_name, n + 1, number_of_steps ))
+        SQLHelper.insert_to_table(df_without_tx, table_name, connection)
+    """
+
+
+def prepare_and_compute(algorithm: AutoencoderRS, df,train, train_clients, train_merchants, candidates = None):  
+    print(f"prepare_and_compute called -- {datetime.datetime.now()}")
+    pd.options.mode.chained_assignment = None
+    df_without_tx = df[(~df["client_id"].isin(train_clients)) | (~df["merchant_id"].isin(train_merchants))]
+    df = df.loc[(df["client_id"].isin(train_clients)) & (df["merchant_id"].isin(train_merchants))]
+    client_indices = np.unique(algorithm.client_enc.transform(df["client_id"]))
+    merchant_indices=[]
+    if (candidates is None) or (len(candidates)==0):
+        merchant_indices = np.unique(algorithm.merchant_enc.transform(df["merchant_id"]))    
+    else:
+        candidates = list(filter(lambda candidate: candidate in df["merchant_id"].unique(), candidates))
+        merchant_indices = np.unique(algorithm.merchant_enc.transform(candidates))
+    pd.options.mode.chained_assignment = 'warn'    
+    r = pd.DataFrame({
+        "client_id": np.repeat(algorithm.client_enc.inverse_transform(client_indices), len(merchant_indices)),
+        "merchant_id" : list(algorithm.merchant_enc.inverse_transform(merchant_indices)) * len(client_indices),
+        "has_transaction_before" : list(map(bool,algorithm.X[:,merchant_indices].toarray().flatten())),
+        "score_ease": algorithm.computeFullPredictionMatrix(merchant_indices=merchant_indices).flatten(),
+        "score": [None] * (len(client_indices) * len(merchant_indices))
+    })
+    print(f"Dataframe prepared -- {datetime.datetime.now()}")
+    return pd.concat([r, df_without_tx])
+
+def get_train_and_candidates(name_of_term, only_possible_candidates):
+    check_file_existence(f"CFTrain{name_of_term}.csv",["name_of_term"],"DataPreparation")
+    train = pd.read_csv(os.path.join(csv_files_folder,f"CFTrain{name_of_term}.csv"))
+    possible_candidates_df=None
+    if(only_possible_candidates):
+        check_file_existence(f"CFCandidates{name_of_term}.csv",["name_of_term"],"DataPreparation")
+        possible_candidates_df = pd.read_csv(os.path.join(csv_files_folder,f"CFCandidates{name_of_term}.csv"))
+    else:
+        check_file_existence(f"CFAllCandidates{name_of_term}.csv",["name_of_term"],"DataPreparation")
+        possible_candidates_df = pd.read_csv(os.path.join(csv_files_folder,f"CFAllCandidates{name_of_term}.csv"))
+    return train, possible_candidates_df
+    

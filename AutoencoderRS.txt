@@ -1,0 +1,158 @@
+from scipy.sparse import csr_matrix
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import LabelEncoder
+from multiprocessing import Pool, cpu_count
+
+from itertools import starmap
+
+class AutoencoderRS:
+    def __init__(self):
+        self.client_enc = LabelEncoder()
+        self.merchant_enc = LabelEncoder()
+
+    def _get_clients_and_merchants(self, df):
+        """
+        Transform ID of clients and merchants to indices of matrix
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Train dataset with columns client_id and merchant_id
+
+        Returns
+        -------
+        _type_
+            Transformed IDs (=indices) of clients and merchants
+        """
+        clients = self.client_enc.fit_transform(df.loc[:, 'client_id'])
+        merchants = self.merchant_enc.fit_transform(df.loc[:, 'merchant_id'])
+        return clients, merchants
+
+    def computePrediction(self, client):
+        """
+        Abstract, every algorithm computes it differently
+        Parameters
+        ----------
+        client : int
+            index of client
+
+        Returns
+        -------
+        np.array
+            prediction row (=merchant scores) for one client
+        
+        """
+        raise NotImplementedError()
+    
+    def computeFullPredictionMatrix(self, merchant_indices=None):
+        """
+        Abstract, every algorithm computes it differently
+        Returns
+        -------
+        np.array
+            Whole matrix clients*merchants with predictions
+        """
+        raise NotImplementedError()
+    
+    def computeClientsBlockPredictionMatrix(self, start, end, merchant_indices=None):
+        raise NotImplementedError()
+
+
+    def computePredictionClientMerchant(self, client, merchant):
+        """
+        Parameters
+        ----------
+        client : int
+            index of client
+        merchant : int
+            index of merchant
+
+        Returns
+        -------
+        np.array
+            predicted score of merchant for client
+        """
+        raise NotImplementedError()
+    
+
+    def predict(self, train, clients, merchants, k, only_merchants_without_transaction = False, get_all = False):
+        """
+        Predicts scores for clients and returns dataset with top k recommendations for each
+        Parameters
+        ----------
+        train : pd.DataFrame
+            The same dataframe that was used as parameter of fit
+        clients : _type_
+            Clients that the method returns recommendations to
+        merchants : _type_
+            Candidates for recommendation
+        k : int
+            How many recommendations should be returned to client
+        only_merchants_without_transaction : bool, optional
+            Will I recommend only merchants where clients havent made transaction before, by default False
+        get_all : bool, optional
+            Ignoring parameter k and returns all possible candidates, by default False
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame in format: [client_id, merchant_id, score, rank(for client)]
+        """
+        merchants = self.merchant_enc.transform(merchants)
+        dd = train.loc[train.client_id.isin(clients)]
+        dd['cm'] = self.merchant_enc.transform(dd.merchant_id)
+        dd['cc'] = self.client_enc.transform(dd.client_id)
+        g = dd.groupby('cc')
+        client_preds = starmap(
+                self.predict_for_client,
+                [(client, group, self.computePrediction(client), merchants, k, only_merchants_without_transaction, get_all)\
+                  for client, group in g],)
+        df = pd.concat(client_preds)
+        df['merchant_id'] = self.merchant_enc.inverse_transform(df['merchant_id'])
+        df['client_id'] = self.client_enc.inverse_transform(df['client_id'])
+        return df
+
+
+    def predict_for_client(self,client, group,  pred, merchants, k, only_merchants_without_transaction = False, get_all = False):
+        """Computes predictions for one client
+
+        Parameters
+        ----------
+        client : int
+            Index of client
+        group : _type_
+            group of merchant indices where user has a transaction
+        pred : _type_
+            prediction = score of merchants for client
+        merchants : _type_
+            candidates - merchants that are possible for recommendations
+        k : int
+            How many recommendations should be returned to client
+        only_merchants_without_transaction : bool, optional
+            Will I recommend only merchants where clients havent made transaction before, by default False
+        get_all : bool, optional
+            Ignoring parameter k and returns all possible candidates, by default False
+
+        Returns
+        -------
+        pd.DataFrame
+            Results of prediction for one client in dataframe with columns client_id, merchant_id, score, rank
+        """
+        candidates = merchants
+        if(only_merchants_without_transaction):
+            with_transaction = set(group['cm'])
+            candidates = [merchant for merchant in merchants if merchant not in with_transaction]
+        if(get_all):
+            k = len(candidates)
+        pred = np.take(pred, candidates)
+        res = np.argpartition(pred, -k)[-k:]
+        r = pd.DataFrame(
+            {
+                "client_id": [client] * len(res),
+                "merchant_id": np.take(candidates, res),
+                "score": np.take(pred, res),
+            }
+        ).sort_values('score', ascending=False)
+        r["rank"]=list(range(1, len(res)+1))
+        return r
